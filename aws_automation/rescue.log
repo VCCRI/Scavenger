@@ -1,0 +1,6 @@
+INFO:RESCUE:[33mINFO: [0m[36mSTARTED RESCUE PROCESSING FOR ID: [0m[35m05102017Thu-5[0m
+INFO:RESCUE:[33mINFO: [0m[36mstarting job: [0m[35minstall-pipeline-0[0m
+INFO:RESCUE:[33mINFO: [0m[92mfinished job: [0m[35minstall-pipeline-0[0m
+INFO:RESCUE:[33mINFO: [0m[36mstarting job: [0m[35mcopy-s3-data-0[0m
+INFO:RESCUE:[33mINFO: [0m[92mfinished job: [0m[35mcopy-s3-data-0[0m
+INFO:RESCUE:[33mINFO: [0m[36mstarting job: [0m[35mfastq-2-i-0[0m
