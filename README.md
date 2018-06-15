@@ -2,6 +2,8 @@
 
 Rescue potential false negative unmapped reads in alignment tools
 
+Manuscript available now on **bioRxiv**: https://www.biorxiv.org/content/early/2018/06/13/345876
+
 ## Getting Started
 
 These instructions will get you a copy of the project up and running on your local machine for development and
