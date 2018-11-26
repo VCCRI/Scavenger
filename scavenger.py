@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import argparse
 import copy
 import gzip
@@ -13,6 +15,7 @@ import shlex
 import shutil
 import string
 import sys
+import tempfile
 
 from Bio import SeqIO
 from collections import defaultdict
@@ -34,90 +37,64 @@ def main(mp_fork, mp_spawn):
     required_args = parser.add_argument_group("required arguments")
     add_args(parser, required_args)
     run_aligner.add_args(parser, required_args)
-    parser.set_defaults(method=scavenge)
-    parser.set_defaults(mp_fork=mp_fork)
-    parser.set_defaults(mp_spawn=mp_spawn)
-
     parser_result = parser.parse_args()
-    aligner = parser_result.aligner
+
+    aligner = parser_result.aligner.lower()
+    bam_output = parser_result.bam_output
+    input_files = parser_result.input
+    source_genome_files = parser_result.genome_file.split(",")
+    genome_index = parser_result.genome_index
+    parser_result.output_dir = parser_result.output_dir.rstrip("/")
+    output_dir = parser_result.output_dir
+    source_align_file = parser_result.source_align_file
+
     build_aligner_index.check_tools(aligner)
     run_aligner.check_tools(aligner)
 
     try:
         blast = Popen("blastn", stdout=PIPE, stderr=PIPE)
         blast.communicate()
-    except:
+    except Exception as e:
         print("[blastn] Error encountered when being called. Script will not run")
-        raise
+        print(e)
+        sys.exit(1)
 
-    parser_result.method(**vars(parser_result))
+    if parser_result.prefix is None:
+        prefix = os.path.splitext(os.path.basename(input_files[0]))[0].rstrip(".fastq").rstrip(".fq")
+    else:
+        prefix = parser_result.prefix
 
+    if output_dir is None:
+        output_prefix = prefix
 
-def add_args(parser, required_args):
-    required_args.add_argument("--genome_files", "-G",
-                               dest="genome_files",
-                               required=True,
-                               help="Genome FASTA file")
-    parser.add_argument("--builder_extra_args", "-be",
-                        dest="builder_extra_args",
-                        default="",
-                        nargs="?",
-                        help="Extra argument to be passed to aligner index build")
-    parser.add_argument("--consensus_threshold", "-c",
-                        dest="consensus_threshold",
-                        default=0.5,
-                        type=float,
-                        help="Consensus threshold (Default: %(default)s)")
-    parser.add_argument("--blast_perc_identity",
-                        dest="blast_identity",
-                        default=84,
-                        type=int,
-                        help="The minimum percentage of identity for BLASTN (Default: %(default)s)")
-    parser.add_argument("--blast_perc_query_coverage",
-                        dest="blast_query_coverage",
-                        default=65,
-                        type=int,
-                        help="The minimum percentage of query coverage for BLASTN (Default: %(default)s)")
-    parser.add_argument("--source_align_file", "-sf",
-                        dest="source_align_file",
-                        help="The source SAM file")
-    parser.add_argument("--new_align_file", "-nf",
-                        dest="new_align_file",
-                        help=argparse.SUPPRESS)
-    parser.add_argument("--new_input", "-ni",
-                        dest="new_input",
-                        help=argparse.SUPPRESS)
+        try:
+            os.mkdir("rescue_data")
+        except FileExistsError:
+            pass
 
+        try:
+            os.mkdir("rescue_tmp")
+        except FileExistsError:
+            pass
+    else:
+        output_prefix = "%s/%s" % (output_dir, prefix)
 
-def scavenge(aligner, genome_index, input_files, output_dir, prefix, num_threads, aligner_extra_args, bam_output,
-             clean_files, quiet, source_align_file, mp_fork, mp_spawn, genome_files, consensus_threshold,
-             blast_identity, blast_query_coverage, **kwargs):
-    if len(input_files) == 2:
-        raise NotImplementedError("Paired-end scavenging not yet supported.")
+        try:
+            os.mkdir(output_dir)
+        except FileExistsError:
+            pass
 
-    # Set prefix from first input file
-    if prefix is None:
-        prefix = os.path.splitext(os.path.basename(input_files[0].split(",")[0]))[0]. \
-            rstrip(".fastq").rstrip(".fq")
+        try:
+            os.mkdir("%s/rescue_data" % output_dir)
+        except FileExistsError:
+            pass
 
-    # Create output directory
-    try:
-        os.mkdir(output_dir)
-    except FileExistsError:
-        pass
+        try:
+            os.mkdir("%s/rescue_tmp" % output_dir)
+        except FileExistsError:
+            pass
 
-    try:
-        os.mkdir("{}/scavenger_data".format(output_dir))
-    except FileExistsError:
-        pass
-
-    try:
-        os.mkdir("{}/scavenger_tmp".format(output_dir))
-    except FileExistsError:
-        pass
-
-    # Logger file handler
-    output_prefix = "{}/{}".format(output_dir, prefix)
+    # Loggger file handler
     global LOGGER
     log_formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %I:%M:%S %p")
     log_file_handler = logging.FileHandler("%s.log" % output_prefix, mode="w")
@@ -132,9 +109,14 @@ def scavenge(aligner, genome_index, input_files, output_dir, prefix, num_threads
     # Source execution
     if source_align_file is None:
         LOGGER.info("Source execution...")
-        source_align_file = run_aligner.run_aligner(aligner, genome_index, input_files, output_dir, prefix,
-                                                    num_threads, aligner_extra_args, bam_output, clean_files, quiet)
+        if genome_index is None:
+            parser_result.genome_index = build_aligner_index.build_index(parser_result)
+
+        source_align_file = run_aligner.run_aligner(parser_result)
         LOGGER.info("Completed source execution")
+
+    if len(parser_result.input) == 2:
+        raise NotImplementedError("Paired-end read recovery not yet supported.")
 
     mapped_reads, unmapped_reads, count_summary = get_mapped_and_unmapped_reads(source_align_file)
 
@@ -149,9 +131,8 @@ def scavenge(aligner, genome_index, input_files, output_dir, prefix, num_threads
     # Gets new alignments and some counting values
     LOGGER.info("Running follow-up execution for rescuing...")
     new_alignments, count_mapped_unmapped, count_unique, count_all = \
-        get_new_alignments(mp_fork, mp_spawn, aligner, output_dir, output_prefix, mapped_reads, genome_files,
-                           source_align_file, unmapped_reads, num_threads, quiet, input_files, consensus_threshold,
-                           blast_identity, blast_query_coverage)
+        get_new_alignments(mp_fork, mp_spawn, mapped_reads, source_genome_files, parser_result, output_prefix,
+                           source_align_file, unmapped_reads)
     LOGGER.info("Completed follow-up execution")
 
     log_rescued_info(num_unmapped_reads, count_mapped_unmapped, count_unique, count_all)
@@ -193,6 +174,50 @@ def scavenge(aligner, genome_index, input_files, output_dir, prefix, num_threads
     LOGGER.info("Rescue mission finished!")
 
 
+def add_args(parser, required_args):
+    required_args.add_argument("--genome_file", "-G",
+                               dest="genome_file",
+                               required=True,
+                               help="Genome FASTA file")
+    parser.add_argument("--genome_index", "-g",
+                        dest="genome_index",
+                        help="The pre-built genome index directory to be used by aligner")
+    parser.add_argument("--annotation", "-a",
+                        dest="annotation",
+                        help="Annotation file to be used by index builder")
+    parser.add_argument("--builder_extra_args", "-be",
+                        dest="builder_extra_args",
+                        default="",
+                        nargs="?",
+                        help="Extra argument to be passed to aligner index build")
+    parser.add_argument("--consensus_threshold", "-c",
+                        dest="consensus_threshold",
+                        default=0.6,
+                        type=float,
+                        help="Consensus threshold (Default: %(default)s)")
+    parser.add_argument("--blast_perc_identity",
+                        dest="blast_identity",
+                        default=84,
+                        type=int,
+                        help="The minimum percentage of identity for BLASTN (Default: %(default)s)")
+    parser.add_argument("--blast_perc_query_coverage",
+                        dest="blast_query_coverage",
+                        default=65,
+                        type=int,
+                        help="The minimum percentage of query coverage for BLASTN (Default: %(default)s)")
+    parser.add_argument("--repeat_db", "-r",
+                        help="Location of index file for tandem repeat database, e.g. from RepBase")
+    parser.add_argument("--source_align_file", "-sf",
+                        dest="source_align_file",
+                        help="The source SAM file")
+    parser.add_argument("--new_align_file", "-nf",
+                        dest="new_align_file",
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--new_input", "-ni",
+                        dest="new_input",
+                        help=argparse.SUPPRESS)
+
+
 # Returns a dict of unmapped reads and a set of mapped reads
 def get_mapped_and_unmapped_reads(source_align_file):
     global LOGGER
@@ -222,7 +247,8 @@ def get_mapped_and_unmapped_reads(source_align_file):
                     unmapped_reads[r.query_sequence].append(r.query_name)
             else:
                 count_summary["mapped"] += 1
-                mapped_reads.add(r.query_name)
+                if r.get_tag("NH") == 1:
+                    mapped_reads.add(r.query_name)
 
     for sequence, best_query in best_unmapped_read.items():
         unmapped_reads[sequence].append(best_query[0])
@@ -235,44 +261,44 @@ def get_mapped_and_unmapped_reads(source_align_file):
 
 
 # Returns a dict of new alignments for the unmapped reads and some counting values
-def get_new_alignments(mp_fork, mp_spawn, aligner, output_dir, output_prefix, mapped_reads, source_genome_files,
-                       source_align_file, unmapped_reads, num_threads, quiet, input_files, consensus_threshold,
-                       blast_identity, blast_query_coverage):
-    # Rebuilds aligner index and rerun alignment with new input and genome
-    new_aligner_index = new_input = num_ref = None
-    results = mp_fork.Queue()
-    procs = []
+def get_new_alignments(mp_fork, mp_spawn, mapped_reads, source_genome_files, parser_result,
+                       output_prefix, source_align_file, unmapped_reads):
+    if parser_result.new_align_file is None:
+        # Rebuilds aligner index and rerun alignment with new input and genome
+        results = mp_fork.Queue()
+        procs = []
 
-    # Starts a process to write the new genome file and build the new aligner index
-    proc = mp_fork.Process(target=build_follow_up_index,
-                           args=(aligner, output_dir, unmapped_reads, len(unmapped_reads) * BIN_SIZE, num_threads,
-                                 quiet, results))
-    proc.start()
-    procs.append(proc)
+        # Starts a process to write the new genome file and build the new aligner index
+        proc = mp_fork.Process(target=build_follow_up_index,
+                               args=(unmapped_reads, parser_result, len(unmapped_reads) * BIN_SIZE, results))
+        proc.start()
+        procs.append(proc)
 
-    # Starts a process to write the new input file
-    proc = mp_fork.Process(target=make_new_input,
-                           args=(input_files[0].split(","), mapped_reads, output_dir, results))
-    proc.start()
-    procs.append(proc)
+        # Starts a process to write the new input file
+        proc = mp_fork.Process(target=make_new_input,
+                               args=(parser_result.input[0].split(","), mapped_reads, parser_result.output_dir,
+                                     results))
+        proc.start()
+        procs.append(proc)
 
-    while True:
-        running = any(proc.is_alive() for proc in procs)
+        while True:
+            running = any(proc.is_alive() for proc in procs)
 
-        while not results.empty():
-            result = results.get()
+            while not results.empty():
+                result = results.get()
 
-            if len(result) == 1:
-                new_input = result
-            else:
-                num_ref, new_aligner_index = result
+                if len(result) == 1:
+                    new_input = result
+                else:
+                    num_ref, new_aligner_index = result
 
-        if not running:
-            break
+            if not running:
+                break
 
-    mapped_reads.clear()
-    new_align_file = run_follow_up_alignment(aligner, new_aligner_index, new_input, num_ref, output_dir, num_threads,
-                                             quiet)
+        mapped_reads.clear()
+        new_align_file = run_follow_up_alignment(parser_result, new_aligner_index, new_input, num_ref)
+    else:
+        new_align_file = parser_result.new_align_file
 
     # Extracts mapped and unmapped reads that have alignment with each other
     art_aligned_mapped_reads, art_aligned_unmapped_reads = get_art_aligned_reads(new_align_file, unmapped_reads)
@@ -289,13 +315,18 @@ def get_new_alignments(mp_fork, mp_spawn, aligner, output_dir, output_prefix, ma
     mapped_reads_info, unmapped_reads_info = \
         make_read_info(source_align_file, art_aligned_mapped_reads, art_aligned_unmapped_reads)
 
-    grouped_unmapped_reads = get_consensus_reads(mp_fork, art_aligned_unmapped_reads, mapped_reads_info,
-                                                 consensus_threshold, num_threads)
+    grouped_unmapped_reads = get_consensus_reads(mp_fork, parser_result, art_aligned_unmapped_reads, mapped_reads_info)
     mapped_reads_info.clear()
 
+    if parser_result.repeat_db:
+        new_grouped_unmapped_reads = get_new_unmapped_reads(grouped_unmapped_reads, unmapped_reads_info,
+                                                            parser_result.repeat_db, output_prefix)
+    else:
+        new_grouped_unmapped_reads = grouped_unmapped_reads
+
     new_alignments, count_unique, count_all, failed_unmapped = \
-        get_rescued_reads(mp_spawn, source_genome_files, grouped_unmapped_reads, unmapped_reads_info, source_align_file,
-                          unmapped_names, num_threads, aligner, output_dir, blast_identity, blast_query_coverage)
+        get_rescued_reads(mp_spawn, source_genome_files, new_grouped_unmapped_reads, unmapped_reads_info, parser_result,
+                          source_align_file, unmapped_names)
 
     if failed_unmapped:
         failed_unmapped_file = "%s_failed.txt" % output_prefix
@@ -311,29 +342,31 @@ def get_new_alignments(mp_fork, mp_spawn, aligner, output_dir, output_prefix, ma
 
 
 # Builds the follow up aligner index
-def build_follow_up_index(aligner, output_dir, unmapped_reads, genome_length, num_threads, quiet, results):
-    new_genome_file, num_ref = make_new_genome(unmapped_reads, output_dir)
-    builder_extra_args = None
+def build_follow_up_index(unmapped_reads, parser_result, genome_length, results):
+    aligner = parser_result.aligner.lower()
+    output_dir = parser_result.output_dir
+    new_genome, num_ref = make_new_genome(unmapped_reads, output_dir, "unmapped_genome")
 
     if aligner == "star":
-        builder_extra_args = "--genomeChrBinNbits %d --genomeSAindexNbases %d" % \
-                             (min(18, int(math.log(genome_length / num_ref, 2))),
-                              min(14, int(math.log(genome_length, 2) / 2) - 1))
-
-    new_genome_index = build_aligner_index.build_index(aligner, new_genome_file, output_dir, None, num_threads,
-                                                       builder_extra_args, quiet)
-    results.put((num_ref, new_genome_index))
+        parser_result.builder_extra_args = "--genomeChrBinNbits %d --genomeSAindexNbases %d" % \
+                                           (min(18, int(math.log(genome_length / num_ref, 2))),
+                                            min(14, int(math.log(genome_length, 2) / 2) - 1))
+    parser_result.genome_file = "/".join(new_genome.split("/")[:-1]) if aligner == "bismark" else new_genome
+    parser_result.annotation = None
+    new_genome_index = build_aligner_index.build_index(parser_result)
 
     global LOGGER
     LOGGER.info("Waiting for new input files...")
 
+    results.put((num_ref, new_genome_index))
+
 
 # Creates a new genome file with unmapped reads, returns the file"s name and the genome"s length
-def make_new_genome(unmapped_reads, output_dir):
+def make_new_genome(unmapped_reads, output_dir, filename):
     global BIN_SIZE, NUM_READ_PER_CHR, LOGGER
 
     LOGGER.info("Making a new genome file with unmapped reads...")
-    new_genome = "{}/scavenger_data/unmapped_genome_all.fa".format(output_dir)
+    new_genome = get_file_new_name(filename, output_dir, "all.fa")
 
     chr_num = 0
     with open(new_genome, "w") as f:
@@ -366,8 +399,7 @@ def make_new_input(input_files, mapped_reads, output_dir, results):
         else:
             f = open(input_file, "r")
 
-        prefix = os.path.splitext(os.path.basename(input_file))[0].rstrip(".fastq").rstrip(".fq")
-        new_input_file = "{}/scavenger_data/{}_mapped.fq".format(output_dir, prefix)
+        new_input_file = get_file_new_name(input_file, output_dir, "mapped.fq")
         new_input += ",%s" % new_input_file
         fq_reads = []
 
@@ -398,13 +430,18 @@ def make_new_input(input_files, mapped_reads, output_dir, results):
 
 
 # Builds new index and aligns with new input and new genome and returns the name of the new sam file
-def run_follow_up_alignment(aligner, new_genome_index, new_input, num_ref, output_dir, num_threads, quiet):
-    aligner_extra_args = None
-    if aligner == "star":
-        aligner_extra_args = "--outFilterMultimapNmax %d --alignIntronMax 1 --seedSearchStartLmax 30" % num_ref
+def run_follow_up_alignment(parser_result, new_genome_index, new_input, num_ref):
+    aligner = parser_result.aligner.lower()
+    old_bam_output = parser_result.bam_output
 
-    new_align_file = run_aligner.run_aligner(aligner, new_genome_index, new_input, output_dir, None, num_threads,
-                                             aligner_extra_args, True, True, quiet)
+    if aligner == "star":
+        parser_result.aligner_extra_args = "--outFilterMultimapNmax %d --alignIntronMax 1 --seedSearchStartLmax 30" % \
+                                           num_ref
+    parser_result.genome_index = new_genome_index
+    parser_result.input = new_input
+    parser_result.bam_output = True
+    new_align_file = run_aligner.run_aligner(parser_result)
+    parser_result.bam_output = old_bam_output
 
     return new_align_file
 
@@ -483,10 +520,13 @@ def make_read_info(source_align_file, art_aligned_mapped_reads, art_aligned_unma
 
 
 # Returns a dict using reference name as the key and store the unmapped reads that passed consensus check
-def get_consensus_reads(mp_fork, art_aligned_unmapped_reads, mapped_reads_info, consensus_threshold, num_threads):
+def get_consensus_reads(mp_fork, parser_result, art_aligned_unmapped_reads, mapped_reads_info):
     global LOGGER
     LOGGER.info("Grouping consensus reads...")
 
+    consensus_threshold = parser_result.consensus_threshold
+    output_dir = parser_result.output_dir
+    threads = parser_result.threads
     grouped_unmapped_reads = defaultdict(dict)
     count_passed_consensus = 0
     procs = []
@@ -495,7 +535,7 @@ def get_consensus_reads(mp_fork, art_aligned_unmapped_reads, mapped_reads_info, 
     results = mp_fork.Queue()
 
     # Starts processing the tasks
-    for _ in range(num_threads):
+    for _ in range(threads):
         proc = mp_fork.Process(target=check_reads_consensus,
                                args=(mapped_reads_info, consensus_threshold, tasks, results))
         proc.start()
@@ -504,7 +544,7 @@ def get_consensus_reads(mp_fork, art_aligned_unmapped_reads, mapped_reads_info, 
     for item in art_aligned_unmapped_reads.items():
         tasks.put(item)
 
-    for _ in range(num_threads):
+    for _ in range(threads):
         tasks.put(None)
 
     art_aligned_unmapped_reads.clear()
@@ -581,7 +621,7 @@ def check_reads_consensus(mapped_reads_info, consensus_threshold, tasks, results
             mapped_locs[ref_id].merge_overlaps(data_reducer=lambda x, y: x+y)
 
             for iv in mapped_locs[ref_id]:
-                if len(iv.data) / len(unmapped_read_mapped_list) >= consensus_threshold:
+                if len(iv.data) >= 2 and len(iv.data) / len(unmapped_read_mapped_list) >= consensus_threshold:
                     most_count_lists[len(iv.data)].append(iv.data)
 
         if most_count_lists:
@@ -599,11 +639,12 @@ def check_reads_consensus(mapped_reads_info, consensus_threshold, tasks, results
 
 
 # Gets rescued reads' alignments
-def get_rescued_reads(mp_spawn, source_genome_files, grouped_unmapped_reads, unmapped_reads_info, source_align_file,
-                      unmapped_names, num_threads, aligner, output_dir, blast_identity, blast_query_coverage):
+def get_rescued_reads(mp_spawn, source_genome_files, grouped_unmapped_reads, unmapped_reads_info, parser_result,
+                      source_align_file, unmapped_names):
     global LOGGER
     LOGGER.info("Rescuing unmapped reads...")
 
+    threads = parser_result.threads
     tasks = mp_spawn.JoinableQueue()
     results = mp_spawn.Queue()
     procs = []
@@ -612,9 +653,9 @@ def get_rescued_reads(mp_spawn, source_genome_files, grouped_unmapped_reads, unm
     new_alignments = defaultdict(list)
 
     # Starts the processes
-    for _ in range(num_threads):
+    for _ in range(threads):
         proc = mp_spawn.Process(target=rescue_reads,
-                                args=(tasks, results, aligner, output_dir, blast_identity, blast_query_coverage))
+                                args=(tasks, results, parser_result))
         proc.start()
         procs.append(proc)
 
@@ -622,7 +663,7 @@ def get_rescued_reads(mp_spawn, source_genome_files, grouped_unmapped_reads, unm
         all_references = list(f.references)
 
     # Fills the tasks queue
-    for genome_file in source_genome_files.split(","):
+    for genome_file in source_genome_files:
         if genome_file.endswith(".gz"):
             f = gzip.open(genome_file, "rt")
         else:
@@ -657,7 +698,7 @@ def get_rescued_reads(mp_spawn, source_genome_files, grouped_unmapped_reads, unm
 
         f.close()
 
-    for _ in range(num_threads):
+    for _ in range(threads):
         tasks.put(None)
 
     grouped_unmapped_reads.clear()
@@ -685,57 +726,21 @@ def get_rescued_reads(mp_spawn, source_genome_files, grouped_unmapped_reads, unm
         if not running:
             break
 
+    new_new_alignments = {}
     for new_name in new_aligned_names.keys():
         num_mapping = len(new_aligned_names[new_name])
-        best_scores = defaultdict(list)
+        if num_mapping == 1:
+            new_new_alignments[new_name] = new_aligned_names[new_name]
 
-        for i, alignment in enumerate(new_aligned_names[new_name]):
-            if alignment.has_tag("NH"):
-                new_tags = set()
-
-                for tag in alignment.tags:
-                    if "NH" not in tag:
-                        new_tags.add(tag)
-
-                alignment.tags = new_tags
-
-            alignment.tags += (("NH", num_mapping),)
-            best_scores[alignment.get_tag("AS")].append((alignment, i))
-
-        first_ref = None
-        first_pos = None
-        target_index = None
-        target_alignment = None
-        best_score_list = best_scores[max(best_scores.keys())]
-
-        for alignment, i in best_score_list:
-            ref = alignment.reference_id
-            pos = alignment.reference_start
-
-            if (first_ref is None and first_pos is None) or ref < first_ref or (ref == first_ref and pos < first_pos):
-                first_ref = ref
-                first_pos = pos
-                target_index = i
-
-        for i, alignment in enumerate(new_aligned_names[new_name]):
-            if i != target_index:
-                alignment.flag += 256
-            else:
-                target_alignment = alignment
-
-        if len(new_aligned_names[new_name]) > 1 and target_alignment is not None:
-            del new_aligned_names[new_name][target_index]
-            new_aligned_names[new_name].insert(0, target_alignment)
-
-    for new_name in new_aligned_names.keys():
+    for new_name in new_new_alignments.keys():
         for query_name in unmapped_names[new_name]:
-            for alignment in new_aligned_names[new_name]:
+            for alignment in new_new_alignments[new_name]:
                 new_alignment = copy.deepcopy(alignment)
                 new_alignment.query_name = query_name
 
                 new_alignments[query_name].append(new_alignment)
 
-    count_unique = len(new_aligned_names)
+    count_unique = len(new_new_alignments)
     count_all = len(new_alignments)
 
     LOGGER.info("Completed rescuing reads")
@@ -745,7 +750,10 @@ def get_rescued_reads(mp_spawn, source_genome_files, grouped_unmapped_reads, unm
 
 # Rescues unmapped reads, returns some counting info and a list of the info of the new alignment
 # New alignment will be length of 1 if no consensus, and length of 2 if the tools have failed to finish
-def rescue_reads(tasks, results, aligner, output_dir, blast_identity, blast_query_coverage):
+def rescue_reads(tasks, results, parser_result):
+    aligner = parser_result.aligner.lower()
+    output_dir = parser_result.output_dir
+
     while True:
         item = tasks.get()
 
@@ -755,7 +763,7 @@ def rescue_reads(tasks, results, aligner, output_dir, blast_identity, blast_quer
 
         unmapped_info, ref_id, start, is_spliced, genome_seq = item
 
-        rescue_tmp_dir = "{}/scavenger_tmp".format(output_dir)
+        rescue_tmp_dir = output_dir + "/rescue_tmp"
         random_prefix = random_string(10)
         temp_dir = "%s/%s_temp" % (rescue_tmp_dir, random_prefix)
         random_output_prefix = "%s/%s" % (rescue_tmp_dir, random_prefix)
@@ -766,14 +774,17 @@ def rescue_reads(tasks, results, aligner, output_dir, blast_identity, blast_quer
 
         if is_spliced:
             # Rebuilds aligner index with target genome file
-            builder_extra_args = None
             if aligner == "star":
-                builder_extra_args = "--genomeSAindexNbases {star_index_num} --outTmpDir {temp_dir}".\
-                    format(star_index_num=star_index_num, temp_dir=temp_dir)
-
+                parser_result.builder_extra_args = "--genomeSAindexNbases {star_index_num} " \
+                                                   "--outTmpDir {temp_dir}".format(star_index_num=star_index_num,
+                                                                                   temp_dir=temp_dir)
+            parser_result.genome_file = target_genome_file
+            parser_result.output_dir = rescue_tmp_dir
+            parser_result.prefix = random_prefix
+            parser_result.quiet = True
+            parser_result.threads = 1
             try:
-                target_genome_index = build_aligner_index.build_index(aligner, target_genome_file, rescue_tmp_dir,
-                                                                      random_prefix, 1, builder_extra_args, True)
+                target_genome_index = build_aligner_index.build_index(parser_result)
             except RuntimeError:
                 for unmapped_name in unmapped_info:
                     unmapped_seq = unmapped_info[unmapped_name][0]
@@ -782,15 +793,15 @@ def rescue_reads(tasks, results, aligner, output_dir, blast_identity, blast_quer
                 continue
 
             # Aligns unmapped read to target genome
-            aligner_extra_args = None
             if aligner == "star":
-                aligner_extra_args = "--outTmpDir %s" % temp_dir
-
+                parser_result.aligner_extra_args = "--outTmpDir %s" % temp_dir
+            else:
+                parser_result.aligner_extra_args = None
+            parser_result.input = [unmapped_read_file]
+            parser_result.genome_index = target_genome_index
             if target_genome_index is not None:
                 try:
-                    target_sam_file = run_aligner.run_aligner(aligner, target_genome_index, [unmapped_read_file],
-                                                              rescue_tmp_dir, random_prefix, 1, aligner_extra_args,
-                                                              False, True, True)
+                    target_sam_file = run_aligner.run_aligner(parser_result)
                 except RuntimeError:
                     for unmapped_name in unmapped_info:
                         unmapped_seq = unmapped_info[unmapped_name][0]
@@ -799,12 +810,12 @@ def rescue_reads(tasks, results, aligner, output_dir, blast_identity, blast_quer
                     continue
         else:
             target_sam_file = "%s.sam" % random_output_prefix
-            command = "blastn -query {unmapped_read} -subject {target_genome} -task blastn -perc_identity {identity} " \
+            command = "blastn -query {unmapped_read} -subject {target_genome} -task megablast -perc_identity {identity} " \
                       "-qcov_hsp_perc {coverage} -outfmt \"17 SQ SR\" -out {sam_output} -parse_deflines". \
                 format(unmapped_read=unmapped_read_file,
                        target_genome=target_genome_file,
-                       identity=blast_identity,
-                       coverage=blast_query_coverage,
+                       identity=parser_result.blast_identity,
+                       coverage=parser_result.blast_query_coverage,
                        sam_output=target_sam_file)
 
             tool_process = Popen(shlex.split(command), stdout=PIPE, stderr=PIPE)
@@ -959,6 +970,58 @@ def get_file_new_name(file_name, output, keyword):
 # Creates random string with the given length
 def random_string(length):
     return "".join(random.choice(string.ascii_letters) for _ in range(length))
+
+
+def get_new_unmapped_reads(grouped_unmapped_reads, unmapped_info, repeat_db, output_prefix):
+    unmapped_names = set()
+    for ref_id in grouped_unmapped_reads:
+        for loc in grouped_unmapped_reads[ref_id]:
+            unmapped_names.update(set(grouped_unmapped_reads[ref_id][loc]))
+
+    input_entries = []
+    for unmapped_name in unmapped_names:
+        unmapped_seq = unmapped_info[unmapped_name][0]
+        input_entries.append(">%s\n%s\n" % (unmapped_name, unmapped_seq))
+
+    with tempfile.NamedTemporaryFile() as tmp_input, tempfile.NamedTemporaryFile() as tmp_output, \
+            open(tmp_input.name, "w") as f:
+        for entry in input_entries:
+            f.write(entry)
+
+        command = "blastn -db {repeat_db} -query {input_fa} -task megablast -perc_identity 90 " \
+                  "-qcov_hsp_perc 80 -outfmt \"17 SQ SR\" -out {sam_output} -parse_deflines -evalue 0.00001". \
+            format(repeat_db=repeat_db,
+                   input_fa=tmp_input.name,
+                   sam_output=tmp_output.name)
+
+        tool_process = Popen(shlex.split(command), stdout=PIPE, stderr=PIPE)
+        tool_out, tool_err = tool_process.communicate()
+
+        if tool_process.returncode != 0 or "[Errno" in tool_err.decode("utf8").strip():
+            raise RuntimeError("Something went wrong\nstdout:{}\nstderr:{}\n".format(tool_out, tool_err))
+
+        filtered_ids = set()
+        if os.path.getsize(tmp_output.name) != 0:
+            with pysam.AlignmentFile(tmp_output.name) as g:
+                for r in g:
+                    if not r.is_unmapped:
+                        filtered_ids.add(r.query_name)
+
+    with open("{}_filtered_ids.txt".format(output_prefix), "w") as f:
+        for filtered_id in filtered_ids:
+            f.write(filtered_id + "\n")
+
+    new_grouped_unmapped_reads = defaultdict(dict)
+    for ref_id in grouped_unmapped_reads:
+        for loc in grouped_unmapped_reads[ref_id]:
+            for unmapped_name in grouped_unmapped_reads[ref_id][loc]:
+                if unmapped_name not in filtered_ids:
+                    if loc in new_grouped_unmapped_reads[ref_id]:
+                        new_grouped_unmapped_reads[ref_id][loc].append(unmapped_name)
+                    else:
+                        new_grouped_unmapped_reads[ref_id][loc] = [unmapped_name]
+
+    return new_grouped_unmapped_reads
 
 
 if __name__ == "__main__":

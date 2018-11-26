@@ -2,6 +2,8 @@
 
 Rescue potential false negative unmapped reads in alignment tools
 
+Manuscript available now on **bioRxiv**: https://www.biorxiv.org/content/early/2018/06/13/345876
+
 ## Getting Started
 
 These instructions will get you a copy of the project up and running on your local machine for development and
@@ -63,6 +65,7 @@ python3 usage: scavenger.py [options] -G/--genome_file <genome_file> -i/--input 
 | `--blast_perc_identity`                 | Minimum percentage of identity for BLASTN |
 | `--blast_perc_query_coverage`           | Minimum percentage of query coverage for BLASTN |
 | `-g/--genome_index <genome_index>`      | The directory of the aligner's index. For Bowtie2, BWA, you will have to specify the prefix of the index files as well |
+| `-r/--repeat_db <repeat_index>`      | The location of index for repetitive sequence database, e.g. RepBase. Inclusion of this argument will filter out reads which align to the repetitive sequence database. |
 | `-o/--output_dir <output_dir>`          | The output directory for the index (Default: current directory) |
 | `-p/--output_prefix <prefix>`           | The prefix for the output index folder (Default: uses the first input file as the prefix) |
 | `-t/--threads`                          | The number of threads to be used by the index builder (Default: 4) |
