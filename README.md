@@ -23,7 +23,7 @@ These are included in `requirements.txt`, run the following commands to install 
 pip install -r requirements.txt
 ```
 
-Type the following command to install these libraries
+Alternatively, type the following command to install these libraries:
 
 ```
 pip3 install --upgrade biopython pysam intervaltree
@@ -52,7 +52,7 @@ python3 usage: scavenger.py [options] -G/--genome_file <genome_file> -i/--input 
 
 | Option                             | Argument |
 | ---------------------------------- | -------- |
-| `-g/--genome_index <genome_index>` | The pre-built genome index for the aligner |
+| `-G/--genome_file <genome_file>` | Genome FASTA file |
 | `-i/--input <input>`               | A comma separated list of input reads (Example: readA.fq,readB.fq). If the reads are paired, use a space to separate reads 1 and 2 (Example: readA_1.fq,readB_1.fq readA_2.fq,readB_2.fq) |
 | `-at/--aligner_tool <aligner>`     | The alignment tool to perform alignment |
 
@@ -60,14 +60,18 @@ python3 usage: scavenger.py [options] -G/--genome_file <genome_file> -i/--input 
 
 | Option                                  | Argument |
 | --------------------------------------- | -------- |
-| `-ae/--aligner_extra_args <extra_args>` | Extra arguments for the aligner. Use this option with quotes (Example: `"-ae=<extra_args>"`) |
+| `-g/--genome_index <genome_index>`      | The directory of the aligner's index. |
+| `-a/--annotation <annotation>`          | Annotation file to be used by index builder |
 | `-be/--builder_extra_args <extra_args>` | Extra arguments for the aligner index building. Use this option with quotes (Example: `"-be=<extra_args>"`) |
+| `-c/--consensus_threshold`              | Consensus threshold (Default: 0.6) |
 | `--blast_perc_identity`                 | Minimum percentage of identity for BLASTN |
 | `--blast_perc_query_coverage`           | Minimum percentage of query coverage for BLASTN |
-| `-g/--genome_index <genome_index>`      | The directory of the aligner's index. For Bowtie2, BWA, you will have to specify the prefix of the index files as well |
-| `-r/--repeat_db <repeat_index>`      | The location of index for repetitive sequence database, e.g. RepBase. Inclusion of this argument will filter out reads which align to the repetitive sequence database. |
+| `-r/--repeat_db <repeat_index>`         | The location of index for repetitive sequence database, e.g. RepBase. Inclusion of this argument will filter out reads which align to the repetitive sequence database. |
+| `-ae/--aligner_extra_args <extra_args>` | Extra arguments for the aligner. Use this option with quotes (Example: `"-ae=<extra_args>"`) |
 | `-o/--output_dir <output_dir>`          | The output directory for the index (Default: current directory) |
 | `-p/--output_prefix <prefix>`           | The prefix for the output index folder (Default: uses the first input file as the prefix) |
+| `--bam`                                 | BAM output file format (Default: SAM output file format) |
+| `--clean`                               | Keep alignment file but remove other files produced by aligner (Default: Keep all files) |
 | `-t/--threads`                          | The number of threads to be used by the index builder (Default: 4) |
 
 ### Example Usage
@@ -103,7 +107,7 @@ python3 utils/build_aligner_index.py [options] -G/--genome_file <genome_file> -a
 | `-a/--annotation <annotation>`          | The annotation file in GTF/GFF format |
 | `-o/--output_dir <output_dir>`          | The output directory for the index (Default: current directory) |
 | `-p/--output_prefix <prefix>`           | The prefix for the output index folder (Default: uses genome file as the prefix) |
-| `-s/--silent`                           | Set to silent the logging information (Default: False) |
+| `-q/--quiet`                            | Set to silent the logging information (Default: False) |
 | `-t/--threads`                          | The number of threads to be used by the index builder (Default: 4) |
 
 ### Example Usage
@@ -137,7 +141,7 @@ python3 utils/run_aligner.py [options] -i/--input <input> -g/--genome_index <gen
 | `-ae/--aligner_extra_args <extra_args>` | Extra arguments for the aligner. Use this option with quotes (Example: `"-ae=<extra_args>"`) |
 | `-o/--output_dir <output_dir>`          | The output directory for the index (Default: current directory) |
 | `-p/--output_prefix <prefix>`           | The prefix for the output index folder (Default: uses the first input file as the prefix) |
-| `-s/--silent`                           | Set to silent the logging information (Default: False) |
+| `-q/--quiet`                           | Set to silent the logging information (Default: False) |
 | `-t/--threads`                          | The number of threads to be used by the index builder (Default: 4) |
 
 ### Example Usage

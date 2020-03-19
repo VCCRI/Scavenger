@@ -1,3 +1,5 @@
+#!/usr/bin/python3
+
 import argparse
 import logging
 import os
@@ -7,58 +9,61 @@ import sys
 from subprocess import Popen, PIPE
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Aligner Index Builder")
-    required_args = parser.add_argument_group('required arguments')
-    add_args(parser, required_args)
-    parser.set_defaults(method=build_index)
-
-    parser_result = parser.parse_args()
-    parser_result.method(**vars(parser_result))
-
-
 # Main function
-def build_index(aligner, genome_files, output_dir, prefix, num_threads, builder_extra_args, quiet, annotation=None,
-                **kwargs):
+def build_index(parser_result):
+    aligner = parser_result.aligner.lower()
+    global quiet
+    quiet = parser_result.quiet
+
     check_tools(aligner)
 
-    # Set prefix from first input file
-    if prefix is None:
-        prefix = os.path.splitext(os.path.basename(genome_files.split(",")[0]))[0].rstrip(".fasta").rstrip(".fa")
-
-    # Create output directory
-    try:
-        os.mkdir(output_dir)
-    except FileExistsError:
-        pass
-
-    root_logger = log_file_handler = None
     if not quiet:
-        # Setup root logger
         log_formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s", datefmt='%Y-%m-%d %I:%M:%S %p')
+        global root_logger
         root_logger = logging.getLogger()
         root_logger.setLevel("INFO")
 
-        # Setup file logger
-        log_file_handler = logging.FileHandler("{}/{}_index_build.log".format(output_dir, prefix))
+    if parser_result.prefix is None:
+        prefix = os.path.splitext(os.path.basename(parser_result.genome_file.split(",")[0]))[0].\
+                rstrip(".fasta").rstrip(".fa")
+    else:
+        prefix = parser_result.prefix
+
+    if parser_result.output_dir is None:
+        output_prefix = prefix
+
+        if not quiet:
+            log_file_handler = logging.FileHandler("%s_index_build.log" % prefix, mode="w")
+    else:
+        output_prefix = "%s/%s" % (parser_result.output_dir.rstrip("/"), prefix)
+
+        try:
+            os.mkdir(parser_result.output_dir)
+        except FileExistsError:
+            pass
+
+        if not quiet:
+            log_file_handler = logging.FileHandler("%s/%s_index_build.log" %
+                                                   (parser_result.output_dir.rstrip("/"), prefix), mode="w")
+
+    if not quiet:
         log_file_handler.setFormatter(log_formatter)
         root_logger.addHandler(log_file_handler)
 
-        # Setup stdout logger
-        if len(root_logger.handlers) == 1:
-            console_handler = logging.StreamHandler(sys.stdout)
-            console_handler.setFormatter(log_formatter)
-            root_logger.addHandler(console_handler)
+    if not quiet and len(root_logger.handlers) == 1:
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(log_formatter)
+        root_logger.addHandler(console_handler)
 
-        tools_names = {"star": "STAR", "subread": "Subread"}
+    tools_names = {"star": "STAR", "subread": "Subread"}
+
+    if not quiet:
         root_logger.info("Building index for %s..." % tools_names[aligner])
 
-    output_prefix = "{}/{}".format(output_dir, prefix)
     if aligner == "star":
-        genome_index = build_star(genome_files, output_prefix, num_threads, builder_extra_args, annotation,
-                                  root_logger, quiet)
+        genome_index = build_star(parser_result, output_prefix)
     elif aligner == "subread":
-        genome_index = build_subread(genome_files, output_prefix, builder_extra_args, root_logger, quiet)
+        genome_index = build_subread(parser_result, output_prefix)
     else:
         genome_index = None
 
@@ -71,10 +76,10 @@ def build_index(aligner, genome_files, output_dir, prefix, num_threads, builder_
 
 # Adds all the arguments to the argument parser
 def add_args(parser, required_args):
-    required_args.add_argument("--genome_files", "-G",
-                               dest="genome_files",
+    required_args.add_argument("--genome_file", "-G",
+                               dest="genome_file",
                                required=True,
-                               help="FASTA Genome file (Note: Bismark takes the directory containing the FASTA file instead)")
+                               help="FASTA Genome file")
     required_args.add_argument("--aligner_tool", "-at",
                                dest="aligner",
                                required=True,
@@ -90,9 +95,7 @@ def add_args(parser, required_args):
                         help="Annotation file to be used")
     parser.add_argument("--output_dir", "-o",
                         dest="output_dir",
-                        default=".",
                         nargs="?",
-                        type=output_dir_str,
                         help="Output directory (default: current directory)")
     parser.add_argument("--output_prefix", "-p",
                         dest="prefix",
@@ -102,7 +105,7 @@ def add_args(parser, required_args):
                         dest="quiet",
                         help=argparse.SUPPRESS)
     parser.add_argument("--threads", "-t",
-                        dest="num_threads",
+                        dest="threads",
                         default=4,
                         type=int,
                         help="Number of threads to be used by aligner index builder (default: %(default)s)")
@@ -120,11 +123,6 @@ def aligner_string(s):
         return s
 
 
-# Strip slash from output directory
-def output_dir_str(s):
-    return s.rstrip("/")
-
-
 # Checks for tools execution
 def check_tools(aligner):
     tools_dir = {"star": "STAR", "subread": "subread-buildindex"}
@@ -137,7 +135,7 @@ def check_tools(aligner):
 
 
 # Builds STAR index
-def build_star(genome_files, output_prefix, num_threads, builder_extra_args, annotation_file, root_logger, quiet):
+def build_star(parser_result, output_prefix):
     genome_index = "%s_star" % output_prefix
     os.mkdir(genome_index) if not os.path.exists(genome_index) else 0
     output_file = "%s/Genome" % genome_index
@@ -146,19 +144,20 @@ def build_star(genome_files, output_prefix, num_threads, builder_extra_args, ann
               "--genomeDir {genome_index} " \
               "--genomeFastaFiles {genome_file} {annotation_option} " \
               "{builder_extra_args}". \
-        format(threads=num_threads,
+        format(threads=parser_result.threads,
                genome_index=genome_index,
-               genome_file=genome_files,
-               annotation_option="--sjdbGTFfile {}".format(annotation_file) if annotation_file else "",
-               builder_extra_args=builder_extra_args)
+               genome_file=parser_result.genome_file,
+               annotation_option="--sjdbGTFfile %s" % parser_result.annotation
+               if parser_result.annotation is not None else "",
+               builder_extra_args=parser_result.builder_extra_args)
 
-    run_tool("STAR", command, output_file, root_logger, quiet)
+    run_tool("STAR", command, output_file)
 
     return genome_index
 
 
 # Builds Subread index
-def build_subread(genome_files, output_prefix, builder_extra_args, root_logger, quiet):
+def build_subread(parser_result, output_prefix):
     genome_index = "%s_subread/" % output_prefix
     os.mkdir(genome_index) if not os.path.exists(genome_index) else 0
     genome_index += "genome"
@@ -167,17 +166,17 @@ def build_subread(genome_files, output_prefix, builder_extra_args, root_logger, 
     command = "subread-buildindex -o {genome_index} " \
               "{builder_extra_args} {genome_file}". \
         format(genome_index=genome_index,
-               builder_extra_args=builder_extra_args,
-               genome_file=genome_files)
+               builder_extra_args=parser_result.builder_extra_args,
+               genome_file=parser_result.genome_file)
 
-    run_tool("Subread-Build", command, output_file, root_logger, quiet)
+    run_tool("Subread-Build", command, output_file)
 
     return genome_index
 
 
 # Runs tools with the given command
 # Also checks for the existence of one of the expected output from the tools
-def run_tool(tool, command, output_file, root_logger, quiet):
+def run_tool(tool, command, output_file):
     if not quiet:
         root_logger.info("Command: %s" % command)
 
@@ -208,4 +207,8 @@ def run_tool(tool, command, output_file, root_logger, quiet):
 
 
 if __name__ == "__main__":
-    main()
+    arg_parser = argparse.ArgumentParser(description="Aligner Index Builder")
+    required_arguments = arg_parser.add_argument_group('required arguments')
+    add_args(arg_parser, required_arguments)
+
+    build_index(arg_parser.parse_args())
